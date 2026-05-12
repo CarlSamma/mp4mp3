@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MP4 to MP3 Converter
-A simple GUI application to convert MP4 video files to MP3 audio.
+Audio to MP3 Converter
+A simple GUI application to convert M4A/MP4 audio or video files to MP3.
 Requires FFmpeg to be installed and in PATH.
 """
 
@@ -18,15 +18,17 @@ class MP4toMP3Converter:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("MP4 to MP3 Converter")
+        self.root.title("Audio to MP3 Converter")
         self.root.resizable(False, False)
         self.root.configure(bg="#f0f0f0")
         
         # Variables
         self.input_file = tk.StringVar()
+        self.input_files = []
         self.output_folder = tk.StringVar(value=os.path.expanduser("~/Desktop"))
         self.progress_value = tk.IntVar(value=0)
         self.is_converting = False
+        self.cancel_requested = False
         self.process = None
         
         # Check FFmpeg availability
@@ -71,13 +73,13 @@ class MP4toMP3Converter:
         # Title
         title_label = ttk.Label(
             main_frame,
-            text="MP4 to MP3 Converter",
+            text="Audio to MP3 Converter",
             font=("Segoe UI", 18, "bold")
         )
         title_label.pack(pady=(0, 20))
         
         # Input file section
-        input_frame = ttk.LabelFrame(main_frame, text="Input Video File", padding="10")
+        input_frame = ttk.LabelFrame(main_frame, text="Input Files", padding="10")
         input_frame.pack(fill=tk.X, pady=(0, 10))
         
         input_entry = ttk.Entry(
@@ -158,17 +160,22 @@ class MP4toMP3Converter:
         style.configure("Convert.TButton", font=("Segoe UI", 11, "bold"))
     
     def browse_input_file(self):
-        """Open file dialog to select input MP4 file."""
-        filename = filedialog.askopenfilename(
-            title="Select MP4 Video File",
+        """Open file dialog to select input audio/video files."""
+        filenames = filedialog.askopenfilenames(
+            title="Select audio or video files",
             filetypes=[
+                ("Audio/Video Files", "*.m4a *.mp4 *.avi *.mov *.mkv"),
+                ("M4A Files", "*.m4a"),
                 ("MP4 Files", "*.mp4"),
-                ("Video Files", "*.mp4 *.avi *.mov *.mkv"),
                 ("All Files", "*.*")
             ]
         )
-        if filename:
-            self.input_file.set(filename)
+        if filenames:
+            self.input_files = list(filenames)
+            if len(self.input_files) == 1:
+                self.input_file.set(self.input_files[0])
+            else:
+                self.input_file.set(f"{len(self.input_files)} files selected")
     
     def browse_output_folder(self):
         """Open directory dialog to select output folder."""
@@ -184,17 +191,18 @@ class MP4toMP3Converter:
         if self.is_converting:
             return
         
-        input_path = self.input_file.get()
+        input_paths = self.input_files
         output_path = self.output_folder.get()
         
         # Validation
-        if not input_path:
-            messagebox.showwarning("No File Selected", "Please select an input video file.")
+        if not input_paths:
+            messagebox.showwarning("No File Selected", "Please select one or more input files.")
             return
         
-        if not os.path.exists(input_path):
-            messagebox.showerror("File Not Found", f"The file does not exist:\n{input_path}")
-            return
+        for path in input_paths:
+            if not os.path.exists(path):
+                messagebox.showerror("File Not Found", f"The file does not exist:\n{path}")
+                return
         
         if not os.path.isdir(output_path):
             messagebox.showerror("Invalid Folder", f"The output folder does not exist:\n{output_path}")
@@ -202,112 +210,136 @@ class MP4toMP3Converter:
         
         # Start conversion in thread
         self.is_converting = True
+        self.cancel_requested = False
         self.convert_btn.config(state='disabled')
         self.cancel_btn.config(state='normal')
         self.progress_value.set(0)
         self.status_label.config(text="Starting conversion...")
         
-        thread = threading.Thread(target=self.convert_file, args=(input_path, output_path))
+        thread = threading.Thread(target=self.convert_file, args=(input_paths, output_path))
         thread.daemon = True
         thread.start()
     
-    def convert_file(self, input_path, output_folder):
-        """Convert MP4 to MP3 using FFmpeg."""
+    def convert_file(self, input_paths, output_folder):
+        """Convert input files to MP3 using FFmpeg."""
         try:
-            # Generate output filename
-            base_name = os.path.splitext(os.path.basename(input_path))[0]
-            output_path = os.path.join(output_folder, f"{base_name}.mp3")
-            
-            # Ensure unique filename
-            counter = 1
-            while os.path.exists(output_path):
-                output_path = os.path.join(output_folder, f"{base_name}_{counter}.mp3")
-                counter += 1
-            
-            self.root.after(0, lambda: self.status_label.config(text="Extracting audio..."))
-            
-            # FFmpeg command for audio extraction
-            # -i: input file
-            # -vn: disable video
-            # -ab 192k: audio bitrate 192kbps
-            # -ar 44100: audio sample rate 44100Hz
-            cmd = [
-                'ffmpeg',
-                '-i', input_path,
-                '-vn',
-                '-ab', '192k',
-                '-ar', '44100',
-                '-y',  # Overwrite output file
-                output_path
-            ]
-            
-            # Run FFmpeg with progress parsing
-            self.process = subprocess.Popen(
-                cmd,
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                universal_newlines=True
-            )
-            
-            # Store process reference for cancellation
-            process = self.process
-            
-            # Parse progress from FFmpeg output
-            duration = None
-            while True:
-                line = process.stderr.readline()
-                if not line:
+            total_files = len(input_paths)
+            completed_files = 0
+            failed_files = []
+
+            for index, input_path in enumerate(input_paths, start=1):
+                if self.cancel_requested:
                     break
-                
-                # Extract duration
-                if duration is None:
-                    duration_match = re.search(r'Duration: (\d+):(\d+):(\d+)\.(\d+)', line)
-                    if duration_match:
-                        hours = int(duration_match.group(1))
-                        minutes = int(duration_match.group(2))
-                        seconds = int(duration_match.group(3))
-                        duration = hours * 3600 + minutes * 60 + seconds
-                
-                # Parse time progress
-                time_match = re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
-                if time_match and duration:
-                    hours = int(time_match.group(1))
-                    minutes = int(time_match.group(2))
-                    seconds = int(time_match.group(3))
-                    current_time = hours * 3600 + minutes * 60 + seconds
-                    progress = min(int((current_time / duration) * 100), 100)
+
+                base_name = os.path.splitext(os.path.basename(input_path))[0]
+                output_path = os.path.join(output_folder, f"{base_name}.mp3")
+                counter = 1
+                while os.path.exists(output_path):
+                    output_path = os.path.join(output_folder, f"{base_name}_{counter}.mp3")
+                    counter += 1
+
+                self.root.after(0, lambda idx=index, tot=total_files, name=base_name: self.status_label.config(
+                    text=f"Converting {name} ({idx}/{tot})..."
+                ))
+
+                cmd = [
+                    'ffmpeg',
+                    '-i', input_path,
+                    '-vn',
+                    '-ab', '192k',
+                    '-ar', '44100',
+                    '-y',
+                    output_path
+                ]
+
+                self.process = subprocess.Popen(
+                    cmd,
+                    stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    universal_newlines=True
+                )
+
+                process = self.process
+                duration = None
+                file_progress = 0
+
+                while True:
+                    line = process.stderr.readline()
+                    if not line:
+                        break
+
+                    if self.cancel_requested:
+                        process.terminate()
+                        break
+
+                    if duration is None:
+                        duration_match = re.search(r'Duration: (\d+):(\d+):(\d+)\.(\d+)', line)
+                        if duration_match:
+                            hours = int(duration_match.group(1))
+                            minutes = int(duration_match.group(2))
+                            seconds = int(duration_match.group(3))
+                            duration = hours * 3600 + minutes * 60 + seconds
+
+                    time_match = re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
+                    if time_match and duration:
+                        hours = int(time_match.group(1))
+                        minutes = int(time_match.group(2))
+                        seconds = int(time_match.group(3))
+                        current_time = hours * 3600 + minutes * 60 + seconds
+                        file_progress = min(int((current_time / duration) * 100), 100)
+                        total_progress = min(int(((index - 1) + (file_progress / 100)) / total_files * 100), 100)
+
+                        self.root.after(0, lambda p=total_progress: self.progress_value.set(p))
+                        self.root.after(0, lambda p=file_progress, idx=index, tot=total_files: self.status_label.config(
+                            text=f"Converting ({idx}/{tot})... {p}%"
+                        ))
+
+                process.wait()
+
+                if self.cancel_requested:
+                    break
+
+                if process.returncode == 0:
+                    completed_files += 1
+                    self.root.after(0, lambda p=min(int((completed_files / total_files) * 100), 100): self.progress_value.set(p))
+                else:
+                    failed_files.append(input_path)
+                    failure_name = os.path.basename(input_path)
+                    self.root.after(0, lambda name=failure_name: self.status_label.config(text=f"Failed: {name}"))
                     
-                    self.root.after(0, lambda p=progress: self.progress_value.set(p))
-                    self.root.after(0, lambda p=progress: self.status_label.config(
-                        text=f"Converting... {p}%"
-                    ))
-            
-            process.wait()
-            
-            if process.returncode == 0:
+                    # Continue converting remaining files after a failure
+                    continue
+
+            if self.cancel_requested:
+                self.root.after(0, lambda: self.status_label.config(text="Conversion cancelled"))
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Cancelled",
+                    "Conversion was cancelled."
+                ))
+            elif failed_files:
+                self.root.after(0, lambda: self.status_label.config(text="Conversion completed with errors"))
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "Partial Success",
+                    f"Converted {completed_files} of {total_files} files successfully.\n"
+                    f"Failed files:\n{chr(10).join(failed_files)}"
+                ))
+            else:
                 self.root.after(0, lambda: self.progress_value.set(100))
                 self.root.after(0, lambda: self.status_label.config(text="Conversion complete!"))
                 self.root.after(0, lambda: messagebox.showinfo(
                     "Success",
-                    f"File converted successfully!\n\nSaved to:\n{output_path}"
+                    f"Converted {completed_files} file{'s' if completed_files != 1 else ''} successfully.\n\nSaved to:\n{output_folder}"
                 ))
-            else:
-                self.root.after(0, lambda: self.status_label.config(text="Conversion failed"))
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Conversion Failed",
-                    "An error occurred during conversion.\n"
-                    "Please check the input file and try again."
-                ))
-        
+
         except Exception as e:
             self.root.after(0, lambda: self.status_label.config(text="Error occurred"))
             self.root.after(0, lambda: messagebox.showerror(
                 "Error",
                 f"An unexpected error occurred:\n{str(e)}"
             ))
-        
         finally:
             self.is_converting = False
+            self.cancel_requested = False
             self.root.after(0, lambda: self.convert_btn.config(state='normal'))
             self.root.after(0, lambda: self.cancel_btn.config(state='disabled'))
             self.process = None
@@ -315,6 +347,7 @@ class MP4toMP3Converter:
     def cancel_conversion(self):
         """Cancel the ongoing conversion process."""
         if self.process and self.is_converting:
+            self.cancel_requested = True
             self.root.after(0, lambda: self.status_label.config(text="Cancelling..."))
             self.process.terminate()
 
